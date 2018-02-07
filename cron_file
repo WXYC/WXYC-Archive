@@ -20,4 +20,4 @@
 # For more information see the manual pages of crontab(5) and cron(8)
 # 
 # m h  dom mon dow   command
-*/30 * * * * cd ~/WXYC-Archive/; ./record_audio.pl -l 1800
+0 * * * * cd ~/WXYC-Archive/; ./record_audio.pl -l 3600
