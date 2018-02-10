@@ -23,13 +23,25 @@ die "Please specify a recording duration in seconds with -l" if $duration == 0;
 my $dt = DateTime->now();
 $dt->set_time_zone("America/New_York");
 
-my $base_file_name =sprintf('%s%02d%02d', 
-	$dt->day_abbr(), 
-	$dt->hour_1(), 
-	$dt->min());
+#to ensure that the files sort correctly, I'm forcing the midnight (2400)
+#recording to read 0000 for the time part of the file name
+my $base_file_name;
+if ($dt->hour_1() == 24) {
+	$base_file_name =sprintf('%s%02d%02d', 
+		$dt->day_abbr(), 
+		0, 
+		$dt->min());
+} else {
+	$base_file_name =sprintf('%s%02d%02d', 
+		$dt->day_abbr(), 
+		$dt->hour_1(), 
+		$dt->min());
+}
 
-my $flac_out = catfile($target_directory,'flac',$base_file_name . ".flac");
-my $mp3_out = catfile($target_directory,'mp3',$dt->year(), 
+
+
+my $flac_out = catfile($target_directory,'recordings','flac',$base_file_name . ".flac");
+my $mp3_out = catfile($target_directory,'recordings','mp3',$dt->year(), 
 	sprintf('%02d',$dt->month),sprintf('%02d',$dt->day), 
 	$base_file_name . ".mp3");
 
