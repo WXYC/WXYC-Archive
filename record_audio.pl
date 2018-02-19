@@ -57,7 +57,7 @@ if ($debug) {
 	system($command);
 }
 
-$command = "flac --totally-silent $wav_out -o $flac_out";
+$command = "flac -f --totally-silent $wav_out -o $flac_out";
 if ($debug) {
 	print "$command\n";
 } else {
