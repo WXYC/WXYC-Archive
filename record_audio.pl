@@ -7,7 +7,7 @@ use File::Path qw/make_path/;
 use Time::localtime;
 use DateTime;
 
-my $target_directory = catfile('/media/wxycarchive/Elements/');
+my $target_directory = catfile('/home/pi/storage');
 
 my $duration = 0;
 my $debug = 0;
@@ -55,21 +55,21 @@ make_path(dirname($wav_out));
 make_path(dirname($flac_out));
 make_path(dirname($mp3_out));
 
-my $command = "arecord -q -d $duration -f cd $wav_out";
+my $command = "arecord -q -N -d $duration -f cd '$wav_out'";
 if ($debug) {
 	print "$command\n";
 } else {
 	system($command);
 }
 
-$command = "flac -f --totally-silent $wav_out -o $flac_out";
+$command = "flac -f --totally-silent '$wav_out' -o '$flac_out'";
 if ($debug) {
 	print "$command\n";
 } else {
 	system($command);
 }
 
-$command = "lame -V0 --quiet $wav_out $mp3_out";
+$command = "lame -V0 --quiet '$wav_out' '$mp3_out'";
 if ($debug) {
 	print "$command\n";
 } else {
