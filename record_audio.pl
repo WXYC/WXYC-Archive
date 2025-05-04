@@ -1,4 +1,4 @@
-#!/usr/bin/env perl
+#!/usr/bin/perl
 
 use Getopt::Long;
 use File::Spec::Functions;
@@ -27,6 +27,7 @@ $dt->set_time_zone("America/New_York");
 #recording to read 0000 for the time part of the file name
 my $base_file_name;
 my $base_flac_name;
+my $full_date_file;
 if ($dt->hour_1() == 24) {
 	$base_file_name =sprintf('%s%02d%02d', 
 		$dt->day_abbr(), 
@@ -34,14 +35,19 @@ if ($dt->hour_1() == 24) {
 		$dt->min());
 
 	$base_flac_name = sprintf('%d-%02d-%02d %02d%02d',
-		$dt->year,$dt->month,$dt->day,0,$dt->min)
+		$dt->year,$dt->month,$dt->day,0,$dt->min);
+	$full_date_file = sprintf('%d%02d%02d%02d%02d',
+		$dt->year,$dt->month,$dt->day,0,$dt->min);
+
 } else {
 	$base_file_name =sprintf('%s%02d%02d', 
 		$dt->day_abbr(), 
 		$dt->hour_1(), 
 		$dt->min());
 	$base_flac_name = sprintf('%d-%02d-%02d %02d%02d',
-		$dt->year,$dt->month,$dt->day,$dt->hour_1,$dt->min)
+		$dt->year,$dt->month,$dt->day,$dt->hour_1,$dt->min);
+	$full_date_file = sprintf('%d%02d%02d%02d%02d',
+		$dt->year,$dt->month,$dt->day,$dt->hour_1,$dt->min);
 }
 
 
@@ -49,6 +55,8 @@ my $flac_out = catfile($target_directory,'recordings','flac',$base_flac_name . "
 my $mp3_out = catfile($target_directory,'recordings','mp3',$dt->year(), 
 	sprintf('%02d',$dt->month),sprintf('%02d',$dt->day), 
 	$base_file_name . ".mp3");
+
+my $s3_out = "s3://wxyc-archive/" . $dt->year() . "/" . sprintf('%02d',$dt->month) . "/" . sprintf('%02d',$dt->day) . "/" . $full_date_file . ".mp3";
 
 my $wav_out = catfile($target_directory,'temp_recording',$base_file_name . ".wav");
 make_path(dirname($wav_out));
@@ -62,6 +70,10 @@ if ($debug) {
 	system($command);
 }
 
+if (! -e $wav_out) {
+	# system("mutt -s 'Something up with archive' matthew.berginski\@gmail.com < /dev/null");
+}
+
 $command = "flac -f --totally-silent '$wav_out' -o '$flac_out'";
 if ($debug) {
 	print "$command\n";
@@ -70,6 +82,13 @@ if ($debug) {
 }
 
 $command = "lame -V0 --quiet '$wav_out' '$mp3_out'";
+if ($debug) {
+	print "$command\n";
+} else {
+	system($command);
+}
+
+$command = "aws s3 cp '$mp3_out' '$s3_out' --quiet";
 if ($debug) {
 	print "$command\n";
 } else {
