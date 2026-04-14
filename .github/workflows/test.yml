@@ -1,0 +1,39 @@
+name: Tests
+
+on:
+  push:
+    branches: [master]
+    paths: [hls-ingest/**]
+  pull_request:
+    paths: [hls-ingest/**]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hls-ingest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: hls-ingest/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Format (black)
+        run: black --check --line-length 100 .
+
+      - name: Unit tests
+        run: pytest -v
+
+      - name: Integration tests
+        run: pytest -m integration -v
