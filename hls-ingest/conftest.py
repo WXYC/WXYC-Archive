@@ -1,7 +1,6 @@
 """Shared pytest fixtures for the HLS ingest service tests."""
 
 import os
-import tempfile
 
 import pytest
 

@@ -1,11 +1,19 @@
-"""S3 upload worker that watches for new HLS segments and uploads them."""
+"""S3 upload worker that watches for completed HLS files and uploads them.
+
+Uses watchdog's FileClosedEvent (inotify on Linux) to detect when ffmpeg
+finishes writing a segment or playlist, then uploads via a separate worker
+thread to avoid blocking the observer. Playlists are deferred until the
+queue drains, ensuring segments reach S3 before the playlist references them.
+"""
 
 import logging
 import os
+import queue
+import threading
 import time
 from typing import Protocol
 
-from watchdog.events import FileCreatedEvent, FileModifiedEvent, FileSystemEventHandler
+from watchdog.events import FileClosedEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 logger = logging.getLogger(__name__)
@@ -19,6 +27,9 @@ CONTENT_TYPES = {
 # Retry configuration for S3 uploads.
 MAX_RETRIES = 3
 BASE_BACKOFF = 1.0
+
+# Default seconds to wait for more segments before uploading a deferred playlist.
+DEFAULT_PLAYLIST_DEFER_SECS = 2.0
 
 
 class S3Client(Protocol):
@@ -101,64 +112,115 @@ def upload_with_retry(
 
 
 class HLSUploadHandler(FileSystemEventHandler):
-    """Watchdog handler that uploads new/modified HLS files to S3.
+    """Watchdog handler that enqueues closed HLS files for upload.
 
-    Monitors a directory for .ts and .m3u8 file events and uploads them
-    to the configured S3 bucket with appropriate content types.
+    Only responds to on_closed events (FileClosedEvent), ensuring files are
+    fully written before being queued. This requires inotify (Linux); the
+    production Docker container runs on Linux.
     """
 
-    def __init__(self, s3_client: S3Client, bucket: str, prefix: str) -> None:
+    def __init__(self, upload_queue: queue.Queue) -> None:
         super().__init__()
+        self._queue = upload_queue
+
+    def on_closed(self, event: FileClosedEvent) -> None:
+        """Enqueue HLS files when they are closed after writing."""
+        if event.is_directory:
+            return
+        filename = os.path.basename(event.src_path)
+        _, ext = os.path.splitext(filename)
+        if ext in CONTENT_TYPES:
+            self._queue.put(event.src_path)
+
+
+class UploadWorkerThread:
+    """Drains an upload queue, uploading segments immediately and deferring playlists.
+
+    Segments (.ts) are uploaded as soon as they are dequeued. Playlists (.m3u8)
+    are held back until no new items arrive for ``playlist_defer_secs``, ensuring
+    segments reach S3 before the playlist references them.
+
+    A None sentinel in the queue signals the thread to stop.
+    """
+
+    def __init__(
+        self,
+        s3_client: S3Client,
+        bucket: str,
+        prefix: str,
+        upload_queue: queue.Queue,
+        playlist_defer_secs: float = DEFAULT_PLAYLIST_DEFER_SECS,
+    ) -> None:
         self.s3_client = s3_client
         self.bucket = bucket
         self.prefix = prefix
+        self._queue = upload_queue
+        self._playlist_defer_secs = playlist_defer_secs
 
-    def on_created(self, event: FileCreatedEvent) -> None:
-        """Handle new file creation events."""
-        if not event.is_directory:
-            self._handle_file(event.src_path)
+    def run(self) -> None:
+        """Process the upload queue until a None sentinel is received."""
+        deferred_playlist: str | None = None
 
-    def on_modified(self, event: FileModifiedEvent) -> None:
-        """Handle file modification events (for playlist updates)."""
-        if not event.is_directory:
-            self._handle_file(event.src_path)
+        while True:
+            timeout = self._playlist_defer_secs if deferred_playlist else None
+            try:
+                path = self._queue.get(timeout=timeout)
+            except queue.Empty:
+                # Timeout expired — upload the deferred playlist now
+                if deferred_playlist:
+                    self._upload(deferred_playlist)
+                    deferred_playlist = None
+                continue
 
-    def _handle_file(self, path: str) -> None:
-        """Upload a file if it has an HLS-related extension."""
+            if path is None:
+                # Sentinel: upload any remaining deferred playlist, then exit
+                if deferred_playlist:
+                    self._upload(deferred_playlist)
+                break
+
+            _, ext = os.path.splitext(path)
+            if ext == ".m3u8":
+                # Defer playlist; upload any previously deferred one first
+                if deferred_playlist:
+                    self._upload(deferred_playlist)
+                deferred_playlist = path
+            else:
+                self._upload(path)
+
+    def _upload(self, path: str) -> None:
+        """Upload a single file to S3."""
         filename = os.path.basename(path)
-        _, ext = os.path.splitext(filename)
-        if ext not in CONTENT_TYPES:
-            return
-
         key = s3_key_for_file(self.prefix, filename)
         upload_with_retry(self.s3_client, path, self.bucket, key)
 
 
 class UploadWorker:
-    """Watches a directory for new HLS segments and uploads them to S3.
+    """Watches a directory for completed HLS files and uploads them to S3.
 
-    Uses watchdog's Observer to monitor the filesystem and trigger uploads
-    via HLSUploadHandler.
-
-    Attributes:
-        observer: The watchdog Observer instance.
-        watch_dir: Directory being monitored.
+    Uses watchdog's Observer to detect file close events and a separate
+    thread to perform uploads, ensuring retries don't block event dispatch.
     """
 
     def __init__(self, s3_client: S3Client, bucket: str, prefix: str, watch_dir: str) -> None:
         self.watch_dir = watch_dir
-        self.handler = HLSUploadHandler(s3_client, bucket, prefix)
+        self._queue: queue.Queue = queue.Queue()
+        self.handler = HLSUploadHandler(self._queue)
+        self._worker = UploadWorkerThread(s3_client, bucket, prefix, self._queue)
         self.observer = Observer()
+        self._upload_thread = threading.Thread(target=self._worker.run, daemon=True)
 
     def start(self) -> None:
-        """Start watching the directory for new files."""
+        """Start watching the directory and uploading files."""
         os.makedirs(self.watch_dir, exist_ok=True)
         self.observer.schedule(self.handler, self.watch_dir, recursive=False)
         self.observer.start()
+        self._upload_thread.start()
         logger.info("Upload worker watching %s", self.watch_dir)
 
     def stop(self) -> None:
-        """Stop the directory watcher."""
+        """Stop the directory watcher and upload thread."""
         self.observer.stop()
         self.observer.join(timeout=10)
+        self._queue.put(None)  # sentinel to stop worker thread
+        self._upload_thread.join(timeout=10)
         logger.info("Upload worker stopped")

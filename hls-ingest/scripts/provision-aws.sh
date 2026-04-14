@@ -52,10 +52,20 @@ aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" \
                 "Expiration": {
                     "Days": 2
                 }
+            },
+            {
+                "ID": "expire-old-versions",
+                "Status": "Enabled",
+                "Filter": {
+                    "Prefix": "live/"
+                },
+                "NoncurrentVersionExpiration": {
+                    "NoncurrentDays": 1
+                }
             }
         ]
     }'
-echo "Configured lifecycle rule (expire after 2 days)"
+echo "Configured lifecycle rules (expire segments after 2 days, old versions after 1 day)"
 
 # CORS configuration for browser-based HLS playback
 aws s3api put-bucket-cors --bucket "$BUCKET" \
@@ -71,22 +81,14 @@ aws s3api put-bucket-cors --bucket "$BUCKET" \
     }'
 echo "Configured CORS for HLS playback"
 
-# Bucket policy: allow public read for the live/ prefix
-aws s3api put-bucket-policy --bucket "$BUCKET" \
-    --policy "{
-        \"Version\": \"2012-10-17\",
-        \"Statement\": [
-            {
-                \"Sid\": \"PublicReadHLS\",
-                \"Effect\": \"Allow\",
-                \"Principal\": \"*\",
-                \"Action\": \"s3:GetObject\",
-                \"Resource\": \"arn:aws:s3:::$BUCKET/live/*\"
-            }
-        ]
-    }"
-echo "Configured public read policy for live/ prefix"
+# NOTE: Do not grant public read access directly on the bucket. Instead,
+# configure a CloudFront Origin Access Control (OAC) to restrict S3 access
+# to CloudFront only. The OAC should be created as part of the CloudFront
+# distribution setup, which is outside the scope of this provisioning script.
+#
+# See: https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-restricting-access-to-s3.html
 
 echo ""
-echo "Provisioning complete. Stream URL will be:"
-echo "  https://$BUCKET.s3.$REGION.amazonaws.com/live/live.m3u8"
+echo "Provisioning complete."
+echo "Configure a CloudFront distribution with OAC to serve:"
+echo "  https://<distribution>.cloudfront.net/live/live.m3u8"
