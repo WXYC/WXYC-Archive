@@ -5,6 +5,7 @@ Orchestrates ffmpeg ingest, S3 upload, and health endpoint.
 
 import asyncio
 import logging
+import shutil
 import signal
 import sys
 import tempfile
@@ -83,6 +84,7 @@ def main() -> None:
     finally:
         uploader.stop()
         loop.call_soon_threadsafe(loop.stop)
+        shutil.rmtree(output_dir, ignore_errors=True)
         logger.info("Shutdown complete")
 
 

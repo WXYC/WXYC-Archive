@@ -1,10 +1,6 @@
 """Tests for the health endpoint under various states."""
 
-import json
-
 import pytest
-from aiohttp import web
-from aiohttp.test_utils import AioHTTPTestCase, TestClient, TestServer
 
 from health import create_health_app
 
@@ -55,3 +51,26 @@ async def test_unknown_route_returns_404(healthy_app, aiohttp_client):
     client = await aiohttp_client(healthy_app)
     resp = await client.get("/nonexistent")
     assert resp.status == 404
+
+
+class TestHealthTypeAnnotations:
+    """Verify proper type annotations instead of bare builtin callable."""
+
+    def test_create_health_app_uses_callable_type(self):
+        import inspect
+
+        sig = inspect.signature(create_health_app)
+        param = sig.parameters["is_healthy"]
+        assert (
+            param.annotation is not callable
+        ), "is_healthy should use Callable[[], bool], not the builtin callable"
+
+    def test_run_health_server_uses_callable_type(self):
+        import inspect
+        from health import run_health_server
+
+        sig = inspect.signature(run_health_server)
+        param = sig.parameters["is_healthy"]
+        assert (
+            param.annotation is not callable
+        ), "is_healthy should use Callable[[], bool], not the builtin callable"

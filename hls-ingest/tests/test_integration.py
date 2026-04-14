@@ -5,15 +5,14 @@ These tests require ffmpeg to be installed and are marked with
 """
 
 import os
-import time
 
 import boto3
 import pytest
 from moto import mock_aws
 
 from config import Config
-from ingest import IngestProcess, build_ffmpeg_args
-from uploader import UploadWorker, upload_with_retry
+from ingest import build_ffmpeg_args
+from uploader import upload_with_retry
 
 
 @pytest.fixture

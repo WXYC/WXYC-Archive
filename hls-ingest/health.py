@@ -2,12 +2,13 @@
 
 import json
 import logging
+from collections.abc import Callable
 from aiohttp import web
 
 logger = logging.getLogger(__name__)
 
 
-def create_health_app(is_healthy: callable) -> web.Application:
+def create_health_app(is_healthy: Callable[[], bool]) -> web.Application:
     """Create an aiohttp application with a /health endpoint.
 
     Args:
@@ -23,15 +24,13 @@ def create_health_app(is_healthy: callable) -> web.Application:
         healthy = is_healthy()
         status_code = 200 if healthy else 503
         body = json.dumps({"status": "ok" if healthy else "degraded", "ffmpeg": healthy})
-        return web.Response(
-            status=status_code, text=body, content_type="application/json"
-        )
+        return web.Response(status=status_code, text=body, content_type="application/json")
 
     app.router.add_get("/health", health_handler)
     return app
 
 
-async def run_health_server(port: int, is_healthy: callable) -> web.AppRunner:
+async def run_health_server(port: int, is_healthy: Callable[[], bool]) -> web.AppRunner:
     """Start the health endpoint HTTP server.
 
     Args:

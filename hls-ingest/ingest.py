@@ -3,6 +3,7 @@
 import logging
 import os
 import subprocess
+import threading
 import time
 
 from config import Config
@@ -75,6 +76,7 @@ class IngestProcess:
         self.process: subprocess.Popen | None = None
         self.running: bool = False
         self._last_start_time: float = 0.0
+        self._stderr_thread: threading.Thread | None = None
 
     def start(self) -> None:
         """Launch the ffmpeg process."""
@@ -86,7 +88,27 @@ class IngestProcess:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
+        self._stderr_thread = threading.Thread(
+            target=self._drain_stderr,
+            args=(self.process.stderr,),
+            daemon=True,
+        )
+        self._stderr_thread.start()
         self._last_start_time = time.monotonic()
+
+    def _drain_stderr(self, stream) -> None:
+        """Read lines from the ffmpeg stderr pipe and log them.
+
+        Runs in a daemon thread to prevent the 64KB pipe buffer from filling,
+        which would deadlock ffmpeg and cause process.wait() to hang.
+        """
+        try:
+            for line in stream:
+                decoded = line.decode("utf-8", errors="replace").rstrip()
+                if decoded:
+                    logger.debug("ffmpeg: %s", decoded)
+        except ValueError:
+            pass  # Stream was closed
 
     def stop(self) -> None:
         """Gracefully stop the ffmpeg process."""

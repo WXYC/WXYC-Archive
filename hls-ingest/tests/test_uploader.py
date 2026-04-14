@@ -1,13 +1,14 @@
-"""Tests for S3 uploads: segment detection, retry logic, content types."""
+"""Tests for S3 uploads: segment detection, retry logic, content types, ordering."""
 
 import os
-import time
+import queue
 from unittest.mock import MagicMock, call, patch
 
-import pytest
+from watchdog.events import FileClosedEvent, FileSystemEventHandler
 
 from uploader import (
     HLSUploadHandler,
+    UploadWorkerThread,
     content_type_for_file,
     s3_key_for_file,
     upload_with_retry,
@@ -81,7 +82,12 @@ class TestUploadWithRetry:
         mock_client.upload_file.side_effect = Exception("fail")
 
         upload_with_retry(
-            mock_client, "/tmp/seg.ts", "bucket", "live/seg.ts", max_retries=3, base_backoff=1.0
+            mock_client,
+            "/tmp/seg.ts",
+            "bucket",
+            "live/seg.ts",
+            max_retries=3,
+            base_backoff=1.0,
         )
 
         assert mock_sleep.call_args_list == [call(1.0), call(2.0), call(4.0)]
@@ -111,52 +117,161 @@ class TestUploadWithRetry:
         assert kwargs["ExtraArgs"] is None
 
 
-class TestHLSUploadHandler:
-    """Tests for the watchdog event handler."""
+class TestHLSUploadHandlerOnClosed:
+    """Tests that the handler uses on_closed and enqueues paths."""
 
-    def test_handles_ts_file_creation(self, tmp_output_dir):
-        mock_client = MagicMock()
-        handler = HLSUploadHandler(mock_client, "bucket", "live")
+    def test_on_closed_enqueues_ts_file(self, tmp_output_dir):
+        q = queue.Queue()
+        handler = HLSUploadHandler(q)
 
         ts_path = os.path.join(tmp_output_dir, "seg_00001.ts")
         with open(ts_path, "wb") as f:
             f.write(b"\x00" * 100)
 
-        from watchdog.events import FileCreatedEvent
+        event = FileClosedEvent(ts_path)
+        handler.on_closed(event)
 
-        event = FileCreatedEvent(ts_path)
-        with patch("uploader.upload_with_retry") as mock_upload:
-            handler.on_created(event)
-            mock_upload.assert_called_once_with(
-                mock_client, ts_path, "bucket", "live/seg_00001.ts"
-            )
+        assert not q.empty()
+        assert q.get_nowait() == ts_path
 
-    def test_ignores_non_hls_files(self, tmp_output_dir):
-        mock_client = MagicMock()
-        handler = HLSUploadHandler(mock_client, "bucket", "live")
-
-        txt_path = os.path.join(tmp_output_dir, "notes.txt")
-        with open(txt_path, "w") as f:
-            f.write("hello")
-
-        from watchdog.events import FileCreatedEvent
-
-        event = FileCreatedEvent(txt_path)
-        with patch("uploader.upload_with_retry") as mock_upload:
-            handler.on_created(event)
-            mock_upload.assert_not_called()
-
-    def test_handles_m3u8_modification(self, tmp_output_dir):
-        mock_client = MagicMock()
-        handler = HLSUploadHandler(mock_client, "bucket", "live")
+    def test_on_closed_enqueues_m3u8_file(self, tmp_output_dir):
+        q = queue.Queue()
+        handler = HLSUploadHandler(q)
 
         m3u8_path = os.path.join(tmp_output_dir, "live.m3u8")
         with open(m3u8_path, "w") as f:
             f.write("#EXTM3U\n")
 
-        from watchdog.events import FileModifiedEvent
+        event = FileClosedEvent(m3u8_path)
+        handler.on_closed(event)
 
-        event = FileModifiedEvent(m3u8_path)
-        with patch("uploader.upload_with_retry") as mock_upload:
-            handler.on_modified(event)
-            mock_upload.assert_called_once()
+        assert not q.empty()
+        assert q.get_nowait() == m3u8_path
+
+    def test_on_closed_ignores_non_hls_files(self, tmp_output_dir):
+        q = queue.Queue()
+        handler = HLSUploadHandler(q)
+
+        txt_path = os.path.join(tmp_output_dir, "notes.txt")
+        with open(txt_path, "w") as f:
+            f.write("hello")
+
+        event = FileClosedEvent(txt_path)
+        handler.on_closed(event)
+
+        assert q.empty()
+
+    def test_handler_does_not_override_on_created(self):
+        q = queue.Queue()
+        handler = HLSUploadHandler(q)
+        assert type(handler).on_created is FileSystemEventHandler.on_created
+
+    def test_handler_does_not_override_on_modified(self):
+        q = queue.Queue()
+        handler = HLSUploadHandler(q)
+        assert type(handler).on_modified is FileSystemEventHandler.on_modified
+
+
+class TestUploadWorkerThread:
+    """Tests for the queue-based upload worker thread."""
+
+    @patch("uploader.upload_with_retry")
+    def test_processes_ts_file_immediately(self, mock_upload, tmp_output_dir):
+        q = queue.Queue()
+        mock_s3 = MagicMock()
+        worker = UploadWorkerThread(mock_s3, "bucket", "live", q)
+
+        ts_path = os.path.join(tmp_output_dir, "seg_00001.ts")
+        with open(ts_path, "wb") as f:
+            f.write(b"\x00" * 100)
+
+        q.put(ts_path)
+        q.put(None)  # sentinel
+
+        worker.run()
+
+        mock_upload.assert_called_once_with(mock_s3, ts_path, "bucket", "live/seg_00001.ts")
+
+    @patch("uploader.upload_with_retry")
+    def test_defers_m3u8_until_queue_drains(self, mock_upload, tmp_output_dir):
+        """Playlist upload is deferred; segments in the queue are uploaded first."""
+        q = queue.Queue()
+        mock_s3 = MagicMock()
+        worker = UploadWorkerThread(mock_s3, "bucket", "live", q, playlist_defer_secs=0.01)
+
+        ts_path = os.path.join(tmp_output_dir, "seg_00001.ts")
+        with open(ts_path, "wb") as f:
+            f.write(b"\x00" * 100)
+
+        m3u8_path = os.path.join(tmp_output_dir, "live.m3u8")
+        with open(m3u8_path, "w") as f:
+            f.write("#EXTM3U\n")
+
+        # Enqueue playlist BEFORE segment — worker should still upload segment first
+        q.put(m3u8_path)
+        q.put(ts_path)
+        q.put(None)
+
+        worker.run()
+
+        calls = [c.args[1] for c in mock_upload.call_args_list]
+        assert calls.index(ts_path) < calls.index(m3u8_path)
+
+    @patch("uploader.upload_with_retry")
+    def test_stops_on_sentinel(self, mock_upload):
+        q = queue.Queue()
+        mock_s3 = MagicMock()
+        worker = UploadWorkerThread(mock_s3, "bucket", "live", q)
+
+        q.put(None)
+        worker.run()
+
+        mock_upload.assert_not_called()
+
+    @patch("uploader.upload_with_retry")
+    def test_handles_multiple_segments_before_playlist(self, mock_upload, tmp_output_dir):
+        q = queue.Queue()
+        mock_s3 = MagicMock()
+        worker = UploadWorkerThread(mock_s3, "bucket", "live", q, playlist_defer_secs=0.01)
+
+        paths = []
+        for i in range(3):
+            ts_path = os.path.join(tmp_output_dir, f"seg_{i:05d}.ts")
+            with open(ts_path, "wb") as f:
+                f.write(b"\x00" * 100)
+            paths.append(ts_path)
+
+        m3u8_path = os.path.join(tmp_output_dir, "live.m3u8")
+        with open(m3u8_path, "w") as f:
+            f.write("#EXTM3U\n")
+
+        q.put(m3u8_path)
+        for p in paths:
+            q.put(p)
+        q.put(None)
+
+        worker.run()
+
+        upload_paths = [c.args[1] for c in mock_upload.call_args_list]
+        # All 3 segments should be uploaded before the playlist
+        m3u8_idx = upload_paths.index(m3u8_path)
+        for p in paths:
+            assert upload_paths.index(p) < m3u8_idx
+
+    @patch("uploader.upload_with_retry")
+    def test_flushes_deferred_playlist_on_shutdown(self, mock_upload, tmp_output_dir):
+        """When sentinel arrives, any deferred playlist is still uploaded."""
+        q = queue.Queue()
+        mock_s3 = MagicMock()
+        worker = UploadWorkerThread(mock_s3, "bucket", "live", q, playlist_defer_secs=0.01)
+
+        m3u8_path = os.path.join(tmp_output_dir, "live.m3u8")
+        with open(m3u8_path, "w") as f:
+            f.write("#EXTM3U\n")
+
+        q.put(m3u8_path)
+        q.put(None)
+
+        worker.run()
+
+        mock_upload.assert_called_once_with(mock_s3, m3u8_path, "bucket", "live/live.m3u8")

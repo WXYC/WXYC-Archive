@@ -4,9 +4,7 @@ import os
 import subprocess
 from unittest.mock import MagicMock, patch
 
-import pytest
 
-from config import Config
 from ingest import IngestProcess, build_ffmpeg_args
 
 
@@ -119,7 +117,9 @@ class TestIngestProcess:
 
     @patch("ingest.subprocess.Popen")
     @patch("ingest.time.sleep")
-    def test_run_forever_restarts_on_crash(self, mock_sleep, mock_popen, sample_config, tmp_output_dir):
+    def test_run_forever_restarts_on_crash(
+        self, mock_sleep, mock_popen, sample_config, tmp_output_dir
+    ):
         """Verify that run_forever restarts ffmpeg after a crash."""
         call_count = 0
 
@@ -141,3 +141,47 @@ class TestIngestProcess:
 
         assert call_count == 2
         assert mock_popen.call_count == 2
+
+
+class TestStderrDraining:
+    """Tests for stderr pipe draining to prevent subprocess deadlock."""
+
+    @patch("ingest.subprocess.Popen")
+    def test_start_launches_stderr_drain_thread(self, mock_popen, sample_config, tmp_output_dir):
+        """Verify that starting ffmpeg also starts a daemon thread to drain stderr."""
+        mock_process = MagicMock()
+        mock_process.stderr = MagicMock()
+        mock_popen.return_value = mock_process
+
+        proc = IngestProcess(sample_config, tmp_output_dir)
+
+        with patch("ingest.threading.Thread") as mock_thread_cls:
+            mock_thread = MagicMock()
+            mock_thread_cls.return_value = mock_thread
+
+            proc.start()
+
+            mock_thread_cls.assert_called_once()
+            assert mock_thread_cls.call_args.kwargs.get("daemon") is True
+            mock_thread.start.assert_called_once()
+
+    def test_drain_stderr_logs_lines(self, sample_config, tmp_output_dir):
+        """Verify that _drain_stderr reads and logs each line from the pipe."""
+        import io
+
+        proc = IngestProcess(sample_config, tmp_output_dir)
+        fake_stderr = io.BytesIO(b"frame=100 fps=25\nsize=1024kB time=00:00:04\n")
+
+        with patch("ingest.logger") as mock_logger:
+            proc._drain_stderr(fake_stderr)
+            assert mock_logger.debug.call_count == 2
+
+    def test_drain_stderr_handles_empty_stream(self, sample_config, tmp_output_dir):
+        """Verify _drain_stderr handles EOF gracefully."""
+        import io
+
+        proc = IngestProcess(sample_config, tmp_output_dir)
+        fake_stderr = io.BytesIO(b"")
+
+        # Should not raise
+        proc._drain_stderr(fake_stderr)
