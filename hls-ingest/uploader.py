@@ -1,9 +1,11 @@
 """S3 upload worker that watches for completed HLS files and uploads them.
 
-Uses watchdog's FileClosedEvent (inotify on Linux) to detect when ffmpeg
-finishes writing a segment or playlist, then uploads via a separate worker
-thread to avoid blocking the observer. Playlists are deferred until the
-queue drains, ensuring segments reach S3 before the playlist references them.
+Uses watchdog's FileClosedEvent (inotify IN_CLOSE_WRITE) for segments and
+FileMovedEvent (inotify IN_MOVED_TO) for playlists. ffmpeg writes playlists
+via atomic rename (.tmp -> .m3u8), so they arrive as move events, not close
+events. Uploads run in a separate worker thread to avoid blocking the
+observer. Playlists are deferred until the queue drains, ensuring segments
+reach S3 before the playlist references them.
 """
 
 import logging
@@ -13,7 +15,7 @@ import threading
 import time
 from typing import Protocol
 
-from watchdog.events import FileClosedEvent, FileSystemEventHandler
+from watchdog.events import FileClosedEvent, FileMovedEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
 logger = logging.getLogger(__name__)
@@ -112,11 +114,12 @@ def upload_with_retry(
 
 
 class HLSUploadHandler(FileSystemEventHandler):
-    """Watchdog handler that enqueues closed HLS files for upload.
+    """Watchdog handler that enqueues completed HLS files for upload.
 
-    Only responds to on_closed events (FileClosedEvent), ensuring files are
-    fully written before being queued. This requires inotify (Linux); the
-    production Docker container runs on Linux.
+    Responds to on_closed (FileClosedEvent) for segments written directly by
+    ffmpeg, and on_moved (FileMovedEvent) for playlists that ffmpeg updates
+    via atomic rename. Both require inotify (Linux); the production Docker
+    container runs on Linux.
     """
 
     def __init__(self, upload_queue: queue.Queue) -> None:
@@ -127,10 +130,23 @@ class HLSUploadHandler(FileSystemEventHandler):
         """Enqueue HLS files when they are closed after writing."""
         if event.is_directory:
             return
-        filename = os.path.basename(event.src_path)
+        self._enqueue_if_hls(event.src_path)
+
+    def on_moved(self, event: FileMovedEvent) -> None:
+        """Enqueue HLS files that arrive via atomic rename.
+
+        ffmpeg updates playlists by writing to a temp file then renaming
+        it. inotify delivers this as IN_MOVED_TO, not IN_CLOSE_WRITE.
+        """
+        if event.is_directory:
+            return
+        self._enqueue_if_hls(event.dest_path)
+
+    def _enqueue_if_hls(self, path: str) -> None:
+        filename = os.path.basename(path)
         _, ext = os.path.splitext(filename)
         if ext in CONTENT_TYPES:
-            self._queue.put(event.src_path)
+            self._queue.put(path)
 
 
 class UploadWorkerThread:
