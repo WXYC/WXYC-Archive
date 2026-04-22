@@ -43,3 +43,6 @@ __pycache__/
 .eggs/
 dist/
 build/
+
+# Deploy config (contains account-specific AWS resource IDs)
+hls-ingest/infra/env.*.conf

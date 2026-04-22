@@ -1,0 +1,357 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  WXYC HLS ingest service. Captures the ibiblio MP3 stream, segments it into
+  HLS via ffmpeg, and uploads to S3. Served via CloudFront with HTTPS.
+
+# ---------------------------------------------------------------------------
+# Parameters — these values change between staging and production deploys.
+# Run:  aws cloudformation deploy --parameter-overrides Environment=staging ...
+# ---------------------------------------------------------------------------
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues:
+      - staging
+      - production
+    Description: Deployment environment (staging or production).
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for the Fargate task. The default VPC works fine.
+
+  SubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: >
+      One or more public subnets for the Fargate task. These must have
+      internet access (either via an internet gateway or NAT).
+
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: Route 53 hosted zone ID for wxyc.org.
+
+  CertificateArn:
+    Type: String
+    Description: >
+      ACM certificate ARN covering hls.wxyc.org and hls-staging.wxyc.org.
+      Must be in us-east-1 (CloudFront requirement).
+
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: Docker image tag to deploy from ECR.
+
+# ---------------------------------------------------------------------------
+# Mappings — values that differ between staging and production.
+# ---------------------------------------------------------------------------
+Mappings:
+  EnvConfig:
+    staging:
+      BucketName: wxyc-hls-staging
+      DomainName: hls-staging.wxyc.org
+      LifecycleDays: 1
+    production:
+      BucketName: wxyc-hls
+      DomainName: hls.wxyc.org
+      LifecycleDays: 2
+
+Resources:
+  # =========================================================================
+  # S3 — stores HLS segments (.ts) and playlist (.m3u8)
+  # =========================================================================
+  HLSBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !FindInMap [EnvConfig, !Ref Environment, BucketName]
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-old-segments
+            Status: Enabled
+            Prefix: live/
+            ExpirationInDays: !FindInMap [EnvConfig, !Ref Environment, LifecycleDays]
+          - Id: expire-old-versions
+            Status: Enabled
+            Prefix: live/
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+      CorsConfiguration:
+        CorsRules:
+          - AllowedMethods: [GET, HEAD]
+            AllowedOrigins: ["*"]
+            AllowedHeaders: ["*"]
+            MaxAge: 3600
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # Bucket policy: only CloudFront can read objects (via OAC).
+  HLSBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref HLSBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontOAC
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${HLSBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+
+  # =========================================================================
+  # CloudFront — HTTPS, caching, custom domain
+  # =========================================================================
+
+  # Origin Access Control: CloudFront signs requests to S3 with SigV4.
+  # This replaces the deprecated OAI (Origin Access Identity).
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "hls-ingest-oac-${Environment}"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # Cache policy for playlists: very short TTL so clients see new segments quickly.
+  PlaylistCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "hls-playlist-${Environment}"
+        MinTTL: 1
+        DefaultTTL: 2
+        MaxTTL: 4
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          HeadersConfig:
+            HeaderBehavior: none
+          CookiesConfig:
+            CookieBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
+  # Cache policy for segments: long TTL since segments are immutable once written.
+  SegmentCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub "hls-segment-${Environment}"
+        MinTTL: 86400
+        DefaultTTL: 86400
+        MaxTTL: 86400
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: false
+          HeadersConfig:
+            HeaderBehavior: none
+          CookiesConfig:
+            CookieBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "WXYC HLS ${Environment}"
+        HttpVersion: http2and3
+        Aliases:
+          - !FindInMap [EnvConfig, !Ref Environment, DomainName]
+        ViewerCertificate:
+          AcmCertificateArn: !Ref CertificateArn
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt HLSBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+            OriginAccessControlId: !GetAtt OriginAccessControl.Id
+        # Default behavior: .ts segments (long cache).
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: !Ref SegmentCachePolicy
+          # Forward Origin header to S3 so CORS response headers are returned.
+          OriginRequestPolicyId: 88a5eaf4-2fd4-4709-b370-b4c650ea3fcf  # Managed-CORS-S3Origin
+          AllowedMethods: [GET, HEAD, OPTIONS]
+          Compress: false  # Segments are compressed media; gzip wastes CPU.
+        # Override for .m3u8 playlists (short cache).
+        CacheBehaviors:
+          - PathPattern: "*.m3u8"
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            CachePolicyId: !Ref PlaylistCachePolicy
+            OriginRequestPolicyId: 88a5eaf4-2fd4-4709-b370-b4c650ea3fcf  # Managed-CORS-S3Origin
+            AllowedMethods: [GET, HEAD, OPTIONS]
+            Compress: true  # Playlists are text; compresses well.
+
+  # =========================================================================
+  # Route 53 — custom domain pointing to CloudFront
+  # =========================================================================
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !FindInMap [EnvConfig, !Ref Environment, DomainName]
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt CloudFrontDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2  # CloudFront's fixed hosted zone ID
+
+  # =========================================================================
+  # IAM — roles for ECS tasks
+  # =========================================================================
+
+  # Execution role: lets ECS pull images from ECR and write to CloudWatch Logs.
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "hls-ingest-exec-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # Task role: lets the running container upload segments to S3.
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "hls-ingest-task-${Environment}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3UploadPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub "${HLSBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt HLSBucket.Arn
+
+  # =========================================================================
+  # ECS — Fargate cluster, task definition, and service
+  # =========================================================================
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/hls-ingest-${Environment}"
+      RetentionInDays: 14
+
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "hls-ingest-${Environment}"
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub "hls-ingest ${Environment} - egress only"
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound (ibiblio stream, S3, ECR, CloudWatch)
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "hls-ingest-${Environment}"
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Cpu: "256"     # 0.25 vCPU — plenty for 128kbps audio transcode
+      Memory: "512"  # 512 MB
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: hls-ingest
+          Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/wxyc/hls-ingest:${ImageTag}"
+          Essential: true
+          Environment:
+            - Name: S3_BUCKET
+              Value: !FindInMap [EnvConfig, !Ref Environment, BucketName]
+            - Name: S3_PREFIX
+              Value: live
+            - Name: AWS_REGION
+              Value: !Ref "AWS::Region"
+          PortMappings:
+            - ContainerPort: 8090
+              Protocol: tcp
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: hls-ingest
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8090/health')\""
+            Interval: 30
+            Timeout: 5
+            Retries: 3
+            StartPeriod: 30
+
+  ECSService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub "hls-ingest-${Environment}"
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets: !Ref SubnetIds
+          SecurityGroups:
+            - !Ref SecurityGroup
+      # Stop-before-start: only one task writes to S3 at a time.
+      # Two concurrent ffmpeg instances would corrupt the playlist.
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+Outputs:
+  HLSUrl:
+    Description: HLS stream URL (paste into a player)
+    Value: !Sub
+      - "https://${Domain}/live/live.m3u8"
+      - Domain: !FindInMap [EnvConfig, !Ref Environment, DomainName]
+
+  CloudFrontDomain:
+    Description: CloudFront distribution domain name
+    Value: !GetAtt CloudFrontDistribution.DomainName
+
+  S3BucketName:
+    Description: S3 bucket for HLS segments
+    Value: !Ref HLSBucket

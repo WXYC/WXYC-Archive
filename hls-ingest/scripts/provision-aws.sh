@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 #
+# DEPRECATED: This script is superseded by the CloudFormation template at
+# infra/template.yaml. Use infra/deploy.sh to provision and deploy.
+# This file is retained for reference during migration.
+#
 # Provision AWS resources for the HLS ingest service.
 #
 # Creates the S3 bucket with a lifecycle rule to expire old segments,

@@ -16,12 +16,12 @@ HLS ingest service for WXYC 89.3 FM. Captures the ibiblio MP3 stream, transcodes
 # Set up
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 
 # Run tests
 pytest
 
-# Run the service (requires AWS credentials)
+# Run the service (requires AWS credentials for local dev)
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
 python main.py
@@ -38,13 +38,18 @@ docker run \
   hls-ingest
 ```
 
-## AWS Provisioning
+## Deployment
 
-The `scripts/provision-aws.sh` script creates the S3 bucket with lifecycle rules, CORS, and a public read policy:
+Deploy to AWS (ECS Fargate + S3 + CloudFront) using the CloudFormation template:
 
 ```bash
-./scripts/provision-aws.sh [bucket-name] [region]
+cd infra
+cp env.staging.conf.example env.staging.conf
+# Fill in VPC_ID, SUBNET_IDS, HOSTED_ZONE_ID, CERTIFICATE_ARN
+./deploy.sh staging
 ```
+
+See `CLAUDE.md` for full deployment documentation and prerequisites.
 
 ## Configuration
 

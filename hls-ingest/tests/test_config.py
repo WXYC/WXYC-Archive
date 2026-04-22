@@ -38,17 +38,21 @@ class TestConfigFromEnv:
         assert config.hls_list_size == 600
         assert config.health_port == 8090
 
-    def test_missing_aws_key_raises(self, monkeypatch):
+    def test_no_aws_credentials_defaults_to_empty(self, monkeypatch):
+        """Credentials are optional; boto3 discovers them from IAM roles on Fargate."""
         monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
         monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
-        with pytest.raises(ValueError, match="AWS_ACCESS_KEY_ID"):
-            Config.from_env()
+        config = Config.from_env()
+        assert config.aws_access_key_id == ""
+        assert config.aws_secret_access_key == ""
 
-    def test_missing_secret_key_raises(self, monkeypatch):
+    def test_partial_credentials_still_succeeds(self, monkeypatch):
+        """Credential validation is deferred to boto3 at runtime, not config loading."""
         monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE")
         monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
-        with pytest.raises(ValueError, match="AWS_ACCESS_KEY_ID"):
-            Config.from_env()
+        config = Config.from_env()
+        assert config.aws_access_key_id == "AKIAIOSFODNN7EXAMPLE"
+        assert config.aws_secret_access_key == ""
 
     def test_custom_env_values(self, monkeypatch):
         monkeypatch.setenv("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE")
