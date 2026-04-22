@@ -110,7 +110,7 @@ fi
 
 echo ""
 echo "▶ Building Docker image..."
-docker build -t "$REPO_NAME:$IMAGE_TAG" "$SERVICE_DIR"
+docker build --platform linux/amd64 -t "$REPO_NAME:$IMAGE_TAG" "$SERVICE_DIR"
 
 echo ""
 echo "▶ Pushing to ECR..."
