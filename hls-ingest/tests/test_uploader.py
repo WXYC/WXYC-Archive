@@ -4,7 +4,7 @@ import os
 import queue
 from unittest.mock import MagicMock, call, patch
 
-from watchdog.events import FileClosedEvent, FileSystemEventHandler
+from watchdog.events import FileClosedEvent, FileMovedEvent, FileSystemEventHandler
 
 from uploader import (
     HLSUploadHandler,
@@ -158,6 +158,39 @@ class TestHLSUploadHandlerOnClosed:
 
         event = FileClosedEvent(txt_path)
         handler.on_closed(event)
+
+        assert q.empty()
+
+    def test_on_moved_enqueues_dest_m3u8(self, tmp_output_dir):
+        """ffmpeg updates playlists via atomic rename (.tmp -> .m3u8).
+
+        inotify delivers this as IN_MOVED_TO (FileMovedEvent), not
+        IN_CLOSE_WRITE (FileClosedEvent). The handler must enqueue the
+        destination path when it has an HLS extension.
+        """
+        q = queue.Queue()
+        handler = HLSUploadHandler(q)
+
+        src = os.path.join(tmp_output_dir, "live.m3u8.tmp")
+        dest = os.path.join(tmp_output_dir, "live.m3u8")
+        with open(dest, "w") as f:
+            f.write("#EXTM3U\n")
+
+        event = FileMovedEvent(src, dest)
+        handler.on_moved(event)
+
+        assert not q.empty()
+        assert q.get_nowait() == dest
+
+    def test_on_moved_ignores_non_hls_dest(self, tmp_output_dir):
+        q = queue.Queue()
+        handler = HLSUploadHandler(q)
+
+        src = os.path.join(tmp_output_dir, "data.tmp")
+        dest = os.path.join(tmp_output_dir, "data.txt")
+
+        event = FileMovedEvent(src, dest)
+        handler.on_moved(event)
 
         assert q.empty()
 
