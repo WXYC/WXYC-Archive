@@ -52,7 +52,7 @@ fi
 # shellcheck source=/dev/null
 source "$CONF_FILE"
 
-for var in VPC_ID SUBNET_IDS HOSTED_ZONE_ID CERTIFICATE_ARN; do
+for var in VPC_ID SUBNET_IDS CERTIFICATE_ARN; do
     if [[ -z "${!var:-}" ]]; then
         echo "Error: $var is not set in $CONF_FILE"
         exit 1
@@ -133,7 +133,6 @@ aws cloudformation deploy \
         "Environment=$ENV" \
         "VpcId=$VPC_ID" \
         "SubnetIds=$SUBNET_IDS" \
-        "HostedZoneId=$HOSTED_ZONE_ID" \
         "CertificateArn=$CERTIFICATE_ARN" \
         "ImageTag=$IMAGE_TAG" \
     --capabilities CAPABILITY_NAMED_IAM \
