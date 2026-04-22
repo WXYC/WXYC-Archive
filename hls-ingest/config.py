@@ -22,11 +22,13 @@ class Config:
     def from_env(cls) -> "Config":
         """Load configuration from environment variables.
 
-        Required:
-            AWS_ACCESS_KEY_ID: AWS access key for S3 uploads.
-            AWS_SECRET_ACCESS_KEY: AWS secret key for S3 uploads.
+        Optional (with defaults).
 
-        Optional (with defaults):
+        AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are optional. When omitted,
+        boto3 discovers credentials from the environment (e.g., IAM task role
+        on ECS Fargate). Set them explicitly for local development.
+
+        Other optional variables:
             IBIBLIO_STREAM_URL: Source MP3 stream URL (default: https://audio-mp3.ibiblio.org/wxyc.mp3).
             S3_BUCKET: Target S3 bucket name (default: wxyc-hls).
             S3_PREFIX: Key prefix for uploaded objects (default: live).
@@ -45,8 +47,6 @@ class Config:
 
         aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID", "")
         aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY", "")
-        if not aws_access_key_id or not aws_secret_access_key:
-            raise ValueError("AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are required")
 
         return cls(
             stream_url=os.environ.get(

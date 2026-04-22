@@ -37,13 +37,14 @@ def main() -> None:
     output_dir = tempfile.mkdtemp(prefix="hls-ingest-")
     logger.info("HLS output directory: %s", output_dir)
 
-    # Set up S3 client
-    s3_client = boto3.client(
-        "s3",
-        region_name=config.aws_region,
-        aws_access_key_id=config.aws_access_key_id,
-        aws_secret_access_key=config.aws_secret_access_key,
-    )
+    # Set up S3 client. When credentials are provided (local dev), pass them
+    # explicitly. When omitted (ECS Fargate), boto3 discovers them from the
+    # task role automatically.
+    s3_kwargs = {"region_name": config.aws_region}
+    if config.aws_access_key_id and config.aws_secret_access_key:
+        s3_kwargs["aws_access_key_id"] = config.aws_access_key_id
+        s3_kwargs["aws_secret_access_key"] = config.aws_secret_access_key
+    s3_client = boto3.client("s3", **s3_kwargs)
 
     # Set up components
     ingest = IngestProcess(config, output_dir)
